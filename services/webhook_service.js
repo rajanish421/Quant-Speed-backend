@@ -59,7 +59,7 @@ class WebhookService {
 
     let uid = subEntity && subEntity.notes && subEntity.notes.uid;
 
-    // Fallback: Look up user UID in Firestore subscriptions mapping
+    // Fallback 1: Look up user UID in Firestore subscriptions mapping
     if (!uid && db) {
       try {
         const mappingDoc = await db.doc(`subscriptions/${subscriptionId}`).get();
@@ -68,6 +68,43 @@ class WebhookService {
         }
       } catch (err) {
         console.warn('[WEBHOOK] UID mapping lookup warning:', err.message);
+      }
+    }
+
+    // Fallback 2: Search by user's current subscriptionId in users collection
+    if (!uid && db) {
+      try {
+        const subGroupSnap = await db.collectionGroup('subscription')
+          .where('subscriptionId', '==', subscriptionId)
+          .limit(1)
+          .get();
+
+        if (!subGroupSnap.empty) {
+          const docRef = subGroupSnap.docs[0].ref;
+          // Path: users/{uid}/subscription/current -> parent.parent.id is uid
+          if (docRef.parent && docRef.parent.parent) {
+            uid = docRef.parent.parent.id;
+            console.log(`[WEBHOOK] Resolved UID ${uid} via collectionGroup search for ${subscriptionId}`);
+          }
+        }
+      } catch (err) {
+        console.warn('[WEBHOOK] CollectionGroup search notice:', err.message);
+      }
+    }
+
+    // Fallback 3: Search users collection by customer email
+    if (!uid && db) {
+      try {
+        const email = (subEntity && (subEntity.customer_email || subEntity.email)) || (paymentEntity && paymentEntity.email);
+        if (email) {
+          const userSnap = await db.collection('users').where('email', '==', email).limit(1).get();
+          if (!userSnap.empty) {
+            uid = userSnap.docs[0].id;
+            console.log(`[WEBHOOK] Resolved UID ${uid} via email (${email}) for subscription ${subscriptionId}`);
+          }
+        }
+      } catch (err) {
+        console.warn('[WEBHOOK] Email search lookup notice:', err.message);
       }
     }
 

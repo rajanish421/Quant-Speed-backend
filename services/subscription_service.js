@@ -286,7 +286,7 @@ class BackendSubscriptionService {
   }
 
   /**
-   * Fetches authoritative subscription state from Firestore and reconciles isPremium.
+   * Fetches authoritative subscription state and dynamically reconciles directly with Razorpay API.
    */
   async getSubscriptionStatus({ uid }) {
     if (!uid) {
@@ -303,7 +303,48 @@ class BackendSubscriptionService {
         return { isPremium: false, status: 'none', razorpayStatus: 'none', planId: null };
       }
 
-      const data = doc.data();
+      let data = doc.data();
+      const subscriptionId = data.subscriptionId || data.razorpaySubscriptionId;
+
+      // Active live reconciliation with Razorpay API (handles Dashboard Pauses, Resumes, Cancellations)
+      if (subscriptionId) {
+        try {
+          const rzpSub = await razorpayClient.fetchSubscription(subscriptionId);
+          if (rzpSub && rzpSub.status) {
+            let liveStatus = rzpSub.status;
+            // If the user already verified checkout with valid signature, do not downgrade back to 'created'
+            if (liveStatus === 'created' && (data.razorpayStatus === 'authenticated' || data.razorpayStatus === 'active' || data.lastPaymentId)) {
+              liveStatus = data.razorpayStatus || 'authenticated';
+            }
+
+            const currentStart = rzpSub.current_start ? new Date(rzpSub.current_start * 1000) : data.currentPeriodStart;
+            const currentEnd = rzpSub.current_end ? new Date(rzpSub.current_end * 1000) : data.currentPeriodEnd;
+            const endedAt = rzpSub.ended_at ? new Date(rzpSub.ended_at * 1000) : (data.endedAt || null);
+
+            const isPremium = calculateIsPremium({ status: liveStatus, currentEnd, endedAt });
+
+            if (data.razorpayStatus !== liveStatus || data.isPremium !== isPremium) {
+              const updateData = {
+                status: liveStatus,
+                razorpayStatus: liveStatus,
+                isPremium,
+                currentPeriodStart: currentStart,
+                currentPeriodEnd: currentEnd,
+                endedAt,
+                updatedAt: new Date(),
+              };
+
+              await db.doc(`users/${uid}/subscription/current`).set(updateData, { merge: true });
+              await db.doc(`subscriptions/${subscriptionId}`).set(updateData, { merge: true });
+              console.log(`[STATUS RECONCILE] Live sync from Razorpay for ${uid} (${subscriptionId}): ${liveStatus}, isPremium: ${isPremium}`);
+              data = { ...data, ...updateData };
+            }
+          }
+        } catch (fetchErr) {
+          console.warn('[STATUS RECONCILE] Live fetch notice:', fetchErr.message || fetchErr);
+        }
+      }
+
       const status = data.razorpayStatus || data.status || 'none';
       const currentEnd = data.currentPeriodEnd;
       const endedAt = data.endedAt;
