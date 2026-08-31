@@ -89,10 +89,13 @@ app.post('/api/webhooks/razorpay', async (req, res) => {
       return res.status(400).json({ error: 'Missing X-Razorpay-Signature header.' });
     }
 
+    const eventIdHeader = req.headers['x-razorpay-event-id'];
+
     const result = await webhookService.processWebhookEvent({
       rawBody,
       signature,
       eventPayload: req.body,
+      eventIdHeader,
     });
 
     return res.status(200).json(result);

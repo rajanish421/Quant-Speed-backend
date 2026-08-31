@@ -280,6 +280,52 @@ async function runE2ETests() {
     console.log('✔ subscription.halted successfully revoked isPremium to false!');
 
     // -------------------------------------------------------------
+    // TEST 5b: Webhook Lifecycle (subscription.paused -> isPremium = false)
+    // -------------------------------------------------------------
+    console.log('\n--- TEST 5b: Webhook Lifecycle (subscription.paused) ---');
+    const pauseEventId = `evt_pause_${Date.now()}`;
+    const pausePayload = {
+      event_id: pauseEventId,
+      event: 'subscription.paused',
+      payload: {
+        subscription: {
+          entity: {
+            id: createdSubscriptionId,
+            plan_id: getRazorpayPlanId('plan_1_month'),
+            status: 'paused',
+            notes: { uid: testUid },
+          },
+        },
+      },
+    };
+
+    const pauseRaw = JSON.stringify(pausePayload);
+    const pauseSig = crypto.createHmac('sha256', webhookSecret).update(pauseRaw).digest('hex');
+
+    await makeRequest(
+      '/api/webhooks/razorpay',
+      {
+        method: 'POST',
+        headers: { 'X-Razorpay-Signature': pauseSig },
+      },
+      null,
+      pauseRaw
+    );
+
+    const statusAfterPause = await makeRequest(
+      '/api/subscriptions/status',
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer mock_user_${testUid}` },
+      }
+    );
+    console.log('Status after pause:', statusAfterPause.data);
+    if (statusAfterPause.data.isPremium === true || statusAfterPause.data.status !== 'paused') {
+      throw new Error('Premium was not revoked after subscription.paused event!');
+    }
+    console.log('✔ subscription.paused successfully revoked isPremium to false!');
+
+    // -------------------------------------------------------------
     // TEST 6: Webhook Lifecycle (subscription.resumed -> isPremium = true)
     // -------------------------------------------------------------
     console.log('\n--- TEST 6: Webhook Lifecycle (subscription.resumed) ---');

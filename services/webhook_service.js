@@ -1,13 +1,14 @@
 const { db } = require('./firebase_admin');
 const razorpayClient = require('./razorpay_client');
 const { RAZORPAY_PLANS, getRazorpayPlanId } = require('../config/razorpay_plans');
+const { calculateIsPremium } = require('./subscription_service');
 
 class WebhookService {
   /**
    * Processes an incoming Razorpay Webhook event.
    */
-  async processWebhookEvent({ rawBody, signature, eventPayload }) {
-    // 1. Verify Webhook Signature using RAW Body
+  async processWebhookEvent({ rawBody, signature, eventPayload, eventIdHeader }) {
+    // 1. Verify Webhook Signature using RAW Body and Secret
     const isValid = razorpayClient.verifyWebhookSignature({
       rawBody,
       signature,
@@ -19,39 +20,54 @@ class WebhookService {
     }
 
     const event = typeof eventPayload === 'string' ? JSON.parse(eventPayload) : eventPayload;
-    const eventId = event.event_id || event.id || `evt_${Date.now()}`;
+    const eventId = eventIdHeader || event.event_id || event.id || `evt_${Date.now()}`;
     const eventType = event.event;
 
     console.log(`[WEBHOOK] Received event: ${eventType} (ID: ${eventId})`);
 
-    // 2. Idempotency Check
+    // 2. Idempotency Check using eventId
     if (db) {
-      const eventDocRef = db.doc(`webhook_events/${eventId}`);
-      const eventDoc = await eventDocRef.get();
-      if (eventDoc.exists) {
-        console.log(`[WEBHOOK] Event ${eventId} was already processed. Skipping for idempotency.`);
-        return { success: true, duplicate: true, eventId };
+      try {
+        const eventDocRef = db.doc(`webhook_events/${eventId}`);
+        const eventDoc = await eventDocRef.get();
+        if (eventDoc.exists) {
+          console.log(`[WEBHOOK] Event ${eventId} was already processed. Skipping for idempotency.`);
+          return { success: true, duplicate: true, eventId, eventType };
+        }
+      } catch (err) {
+        console.warn('[WEBHOOK] Idempotency read warning:', err.message);
       }
     }
 
-    // 3. Extract Subscription Entity & Resolve User UID
+    // 3. Extract Subscription & Payment Entities
     const subEntity = event.payload && event.payload.subscription ? event.payload.subscription.entity : null;
     const paymentEntity = event.payload && event.payload.payment ? event.payload.payment.entity : null;
 
-    if (!subEntity) {
-      console.log(`[WEBHOOK] Event ${eventType} has no subscription entity. Acknowledged.`);
-      await this._recordProcessedEvent(eventId, eventType, null, 'no_subscription_entity');
+    if (!subEntity && !paymentEntity) {
+      console.log(`[WEBHOOK] Event ${eventType} has no subscription or payment entity. Acknowledged.`);
+      await this._recordProcessedEvent(eventId, eventType, null, 'no_entity');
       return { success: true, eventId };
     }
 
-    const subscriptionId = subEntity.id;
-    let uid = subEntity.notes && subEntity.notes.uid;
+    const subscriptionId = subEntity ? subEntity.id : (paymentEntity && paymentEntity.subscription_id);
 
-    // Fallback: Look up user in Firestore subscriptions mapping
+    if (!subscriptionId) {
+      console.log(`[WEBHOOK] Event ${eventType} is not linked to a subscription ID.`);
+      await this._recordProcessedEvent(eventId, eventType, null, 'non_subscription_payment');
+      return { success: true, eventId };
+    }
+
+    let uid = subEntity && subEntity.notes && subEntity.notes.uid;
+
+    // Fallback: Look up user UID in Firestore subscriptions mapping
     if (!uid && db) {
-      const mappingDoc = await db.doc(`subscriptions/${subscriptionId}`).get();
-      if (mappingDoc.exists) {
-        uid = mappingDoc.data().uid;
+      try {
+        const mappingDoc = await db.doc(`subscriptions/${subscriptionId}`).get();
+        if (mappingDoc.exists) {
+          uid = mappingDoc.data().uid;
+        }
+      } catch (err) {
+        console.warn('[WEBHOOK] UID mapping lookup warning:', err.message);
       }
     }
 
@@ -61,8 +77,15 @@ class WebhookService {
       return { success: true, eventId, note: 'unmapped_subscription' };
     }
 
-    // 4. Handle Lifecycle Events
-    await this._handleSubscriptionLifecycle(uid, eventType, subEntity, paymentEntity);
+    // 4. Handle Subscription Lifecycle Events
+    await this._handleSubscriptionLifecycle({
+      uid,
+      eventId,
+      eventType,
+      subscriptionId,
+      subEntity,
+      paymentEntity,
+    });
 
     // 5. Mark Event Processed for Idempotency
     await this._recordProcessedEvent(eventId, eventType, subscriptionId, 'processed');
@@ -70,17 +93,17 @@ class WebhookService {
     return { success: true, eventId, eventType, uid, subscriptionId };
   }
 
-  async _handleSubscriptionLifecycle(uid, eventType, subEntity, paymentEntity) {
+  async _handleSubscriptionLifecycle({ uid, eventId, eventType, subscriptionId, subEntity, paymentEntity }) {
     if (!db) return;
 
-    const subscriptionId = subEntity.id;
-    const currentStart = subEntity.current_start ? new Date(subEntity.current_start * 1000) : new Date();
-    const currentEnd = subEntity.current_end ? new Date(subEntity.current_end * 1000) : new Date(Date.now() + 30 * 86400000);
-    const nextChargeAt = subEntity.charge_at ? new Date(subEntity.charge_at * 1000) : currentEnd;
+    const currentStart = (subEntity && subEntity.current_start) ? new Date(subEntity.current_start * 1000) : new Date();
+    const currentEnd = (subEntity && subEntity.current_end) ? new Date(subEntity.current_end * 1000) : new Date(Date.now() + 30 * 86400000);
+    const nextChargeAt = (subEntity && subEntity.charge_at) ? new Date(subEntity.charge_at * 1000) : currentEnd;
+    const endedAt = (subEntity && subEntity.ended_at) ? new Date(subEntity.ended_at * 1000) : null;
 
     // Resolve planId
-    let planId = subEntity.notes && subEntity.notes.planId;
-    if (!planId) {
+    let planId = subEntity && subEntity.notes && subEntity.notes.planId;
+    if (!planId && subEntity && subEntity.plan_id) {
       for (const [key] of Object.entries(RAZORPAY_PLANS)) {
         if (getRazorpayPlanId(key) === subEntity.plan_id) {
           planId = key;
@@ -89,85 +112,106 @@ class WebhookService {
       }
     }
 
-    const batch = db.batch();
-    const userSubRef = db.doc(`users/${uid}/subscription/current`);
-    const subMappingRef = db.doc(`subscriptions/${subscriptionId}`);
-
-    let status = subEntity.status || 'active';
-    let isPremium = true;
+    let status = (subEntity && subEntity.status) || 'active';
 
     switch (eventType) {
       case 'subscription.authenticated':
+        status = 'authenticated';
+        console.log(`[WEBHOOK] Subscription authenticated: ${subscriptionId} for ${uid}`);
+        break;
+
       case 'subscription.activated':
       case 'subscription.resumed':
         status = 'active';
-        isPremium = true;
+        console.log(`[WEBHOOK] Subscription active/resumed: ${subscriptionId} for ${uid}`);
         break;
 
       case 'subscription.charged':
         status = 'active';
-        isPremium = true;
-        console.log(`[WEBHOOK] Recurring subscription charged successfully: ${subscriptionId} for ${uid}`);
+        console.log(`[WEBHOOK] Recurring subscription charged: ${subscriptionId} for ${uid}`);
         break;
 
       case 'subscription.pending':
         status = 'pending';
-        // Keep active while retrying during grace period
-        isPremium = new Date() < currentEnd;
+        console.log(`[WEBHOOK] Subscription pending payment retry: ${subscriptionId}`);
         break;
 
       case 'subscription.halted':
         status = 'halted';
-        isPremium = false;
         console.log(`[WEBHOOK] Subscription halted (retries exhausted): ${subscriptionId}`);
         break;
 
       case 'subscription.paused':
         status = 'paused';
-        isPremium = false;
+        console.log(`[WEBHOOK] Subscription paused from Dashboard: ${subscriptionId}`);
         break;
 
       case 'subscription.cancelled':
         status = 'cancelled';
-        // Active until end of current paid cycle
-        isPremium = new Date() < currentEnd;
+        console.log(`[WEBHOOK] Subscription cancelled: ${subscriptionId}`);
         break;
 
       case 'subscription.completed':
         status = 'completed';
-        isPremium = new Date() < currentEnd;
+        console.log(`[WEBHOOK] Subscription completed all cycles: ${subscriptionId}`);
+        break;
+
+      case 'subscription.updated':
+        console.log(`[WEBHOOK] Subscription updated: ${subscriptionId}`);
+        break;
+
+      case 'payment.failed':
+        console.warn(`[WEBHOOK] Payment failed for subscription: ${subscriptionId}`);
         break;
 
       default:
-        console.log(`[WEBHOOK] Event ${eventType} recorded for subscription: ${subscriptionId}`);
+        console.log(`[WEBHOOK] Event ${eventType} received for subscription: ${subscriptionId}`);
         break;
     }
+
+    // Authoritatively calculate isPremium from Razorpay state
+    const isPremium = calculateIsPremium({
+      status,
+      currentEnd,
+      endedAt,
+    });
 
     const updateData = {
       provider: 'razorpay',
       subscriptionId,
+      razorpaySubscriptionId: subscriptionId,
       planId: planId || 'plan_1_month',
-      razorpayPlanId: subEntity.plan_id || '',
+      razorpayPlanId: (subEntity && subEntity.plan_id) || '',
       status,
+      razorpayStatus: status,
       isPremium,
       currentPeriodStart: currentStart,
       currentPeriodEnd: currentEnd,
       nextChargeAt,
-      lastPaymentId: (paymentEntity && paymentEntity.id) || subEntity.payment_id || '',
-      lastEvent: eventType,
+      endedAt,
+      lastPaymentId: (paymentEntity && paymentEntity.id) || (subEntity && subEntity.payment_id) || '',
+      lastWebhookEvent: eventType,
+      lastWebhookEventId: eventId,
       updatedAt: new Date(),
     };
+
+    const batch = db.batch();
+    const userSubRef = db.doc(`users/${uid}/subscription/current`);
+    const subMappingRef = db.doc(`subscriptions/${subscriptionId}`);
 
     batch.set(userSubRef, updateData, { merge: true });
     batch.set(subMappingRef, {
       uid,
       status,
-      lastEvent: eventType,
+      razorpayStatus: status,
+      isPremium,
+      lastWebhookEvent: eventType,
+      lastWebhookEventId: eventId,
       updatedAt: new Date(),
     }, { merge: true });
 
     await batch.commit();
-    console.log(`[WEBHOOK] Updated Firestore for ${uid}: status=${status}, isPremium=${isPremium}`);
+    console.log(`[WEBHOOK] Synced Firestore for ${uid}: status=${status}, isPremium=${isPremium}, event=${eventType}`);
   }
 
   async _recordProcessedEvent(eventId, eventType, subscriptionId, result) {
