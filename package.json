@@ -1,0 +1,30 @@
+{
+  "name": "quantspeed-backend",
+  "version": "1.0.0",
+  "description": "Trusted Node.js backend for QuantSpeed subscriptions, Razorpay recurring webhooks, battle presence, and FCM messaging.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test tests/server.test.js tests/subscription.test.js",
+    "setup-plans": "node scripts/setup_razorpay_plans.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.1.0",
+    "razorpay": "^2.9.8"
+  },
+  "keywords": [
+    "quantspeed",
+    "razorpay",
+    "subscriptions",
+    "fcm",
+    "notifications",
+    "math",
+    "battle"
+  ],
+  "author": "QuantSpeed Team",
+  "license": "ISC"
+}
