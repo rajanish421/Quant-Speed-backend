@@ -66,40 +66,23 @@ class BackendSubscriptionService {
 
     const subscriptionId = rzpSubscription.id;
 
-    // Persist pending subscription state in Firestore
+    // Persist pending checkout mapping in Firestore (Do NOT overwrite user's active subscription!)
     if (db) {
       try {
-        const batch = db.batch();
-
-        const userSubRef = db.doc(`users/${uid}/subscription/current`);
-        batch.set(userSubRef, {
-          provider: 'razorpay',
-          subscriptionId,
-          razorpaySubscriptionId: subscriptionId,
-          planId,
-          razorpayPlanId,
-          status: 'created',
-          razorpayStatus: 'created',
-          isPremium: false,
-          userEmail: userEmail || '',
-          userPhone: userPhone || '',
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }, { merge: true });
-
         const subMappingRef = db.doc(`subscriptions/${subscriptionId}`);
-        batch.set(subMappingRef, {
+        await subMappingRef.set({
           uid,
           planId,
           razorpayPlanId,
           status: 'created',
           razorpayStatus: 'created',
+          userEmail: userEmail || '',
+          userPhone: userPhone || '',
           createdAt: new Date(),
           updatedAt: new Date(),
         });
 
-        await batch.commit();
-        console.log(`[SUBSCRIPTION] Created pending subscription: ${subscriptionId} for user: ${uid}`);
+        console.log(`[SUBSCRIPTION] Created pending checkout session: ${subscriptionId} for user: ${uid}`);
       } catch (err) {
         console.warn('[SUBSCRIPTION] Firestore storage warning:', err.message);
       }
