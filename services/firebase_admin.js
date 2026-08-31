@@ -14,24 +14,33 @@ function findServiceAccountKey() {
     return process.env.GOOGLE_APPLICATION_CREDENTIALS;
   }
 
-  // 2. quantspeed_backend/serviceAccountKey.json
+  // 2. Render Secret Files standard path (/etc/secrets/serviceAccountKey.json)
+  const renderSecretPath = '/etc/secrets/serviceAccountKey.json';
+  if (fs.existsSync(renderSecretPath)) {
+    console.log('[FIREBASE ADMIN] Found serviceAccountKey.json in Render secret files (/etc/secrets/)');
+    return renderSecretPath;
+  }
+
+  // 3. Local quantspeed_backend/serviceAccountKey.json
   const localKeyPath = path.join(__dirname, '../serviceAccountKey.json');
   if (fs.existsSync(localKeyPath)) {
     return localKeyPath;
   }
 
-  // 3. Search ~/Downloads for quantspeed-math-*.json or serviceAccountKey*.json
+  // 4. Search ~/Downloads for quantspeed-math-*.json or serviceAccountKey*.json
   const downloadsDir = path.join(os.homedir(), 'Downloads');
   if (fs.existsSync(downloadsDir)) {
-    const files = fs.readdirSync(downloadsDir);
-    const match = files.find(f => 
-      (f.startsWith('quantspeed-math-firebase-adminsdk') || f.startsWith('quantspeed-math') || f.startsWith('serviceAccountKey')) && f.endsWith('.json')
-    );
-    if (match) {
-      const foundPath = path.join(downloadsDir, match);
-      console.log(`[FIREBASE ADMIN] Automatically detected service account in Downloads: ${match}`);
-      return foundPath;
-    }
+    try {
+      const files = fs.readdirSync(downloadsDir);
+      const match = files.find(f => 
+        (f.startsWith('quantspeed-math-firebase-adminsdk') || f.startsWith('quantspeed-math') || f.startsWith('serviceAccountKey')) && f.endsWith('.json')
+      );
+      if (match) {
+        const foundPath = path.join(downloadsDir, match);
+        console.log(`[FIREBASE ADMIN] Automatically detected service account in Downloads: ${match}`);
+        return foundPath;
+      }
+    } catch (_) {}
   }
 
   return null;
@@ -42,37 +51,50 @@ function initializeFirebaseAdmin() {
 
   const keyPath = findServiceAccountKey();
   const dbUrl = process.env.FIREBASE_DATABASE_URL || 'https://quantspeed-math-default-rtdb.firebaseio.com';
+  const projectId = process.env.FIREBASE_PROJECT_ID || 'quantspeed-math';
 
   try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: process.env.FIREBASE_PROJECT_ID || 'quantspeed-math',
-        databaseURL: dbUrl,
-      });
+      let rawKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY.trim();
+      if (rawKey.startsWith('{')) {
+        const serviceAccount = JSON.parse(rawKey);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.project_id || projectId,
+          databaseURL: dbUrl,
+        });
+      } else {
+        // Handle Base64 encoded JSON
+        const decoded = Buffer.from(rawKey, 'base64').toString('utf8');
+        const serviceAccount = JSON.parse(decoded);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.project_id || projectId,
+          databaseURL: dbUrl,
+        });
+      }
       console.log('[FIREBASE ADMIN] Initialized using FIREBASE_SERVICE_ACCOUNT_KEY env var.');
     } else if (keyPath) {
       const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id || 'quantspeed-math',
+        projectId: serviceAccount.project_id || projectId,
         databaseURL: dbUrl,
       });
       console.log(`[FIREBASE ADMIN] Initialized successfully with Service Account Key: ${keyPath}`);
     } else {
       admin.initializeApp({
-        projectId: process.env.FIREBASE_PROJECT_ID || 'quantspeed-math',
+        projectId,
         databaseURL: dbUrl,
       });
-      console.log('[FIREBASE ADMIN] Initialized in default mode. (Place serviceAccountKey.json in quantspeed_backend/ to enable live FCM and Firestore)');
+      console.warn('[FIREBASE ADMIN WARNING] Initialized without credentials. Add serviceAccountKey.json to Render Secret Files or FIREBASE_SERVICE_ACCOUNT_KEY env var to enable Realtime DB & Firestore access.');
     }
     isInitialized = true;
   } catch (error) {
     console.warn('[FIREBASE ADMIN] Initialization notice:', error.message);
     if (!admin.apps.length) {
       admin.initializeApp({
-        projectId: 'quantspeed-math',
+        projectId,
         databaseURL: dbUrl,
       });
     }
