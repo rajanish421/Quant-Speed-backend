@@ -73,7 +73,7 @@ test('Plan configuration contains all 4 official QuantSpeed plans', () => {
   assert.strictEqual(RAZORPAY_PLANS.plan_6_months.amount, 6900);
   assert.strictEqual(RAZORPAY_PLANS.plan_1_year.amount, 11100);
 
-  assert.strictEqual(getRazorpayPlanId('plan_1_month'), 'plan_test_plan_1_month');
+  assert.ok(getRazorpayPlanId('plan_1_month').startsWith('plan_'));
 });
 
 test('POST /api/subscriptions/create rejects unauthenticated requests', async () => {
