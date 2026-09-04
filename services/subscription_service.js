@@ -5,35 +5,36 @@ const { RAZORPAY_PLANS, getRazorpayPlanId } = require('../config/razorpay_plans'
 /**
  * Calculates authoritative isPremium status based on Razorpay subscription status and valid billing period.
  */
-function calculateIsPremium({ status, currentEnd, endedAt }) {
+function calculateIsPremium({ status, currentEnd, endedAt, paidCount = 1 }) {
+  // If paidCount is explicitly 0, the user has never paid for this subscription
+  if (paidCount === 0) {
+    return false;
+  }
+
   const now = new Date();
   const periodEnd = currentEnd ? (currentEnd.toDate ? currentEnd.toDate() : new Date(currentEnd)) : null;
 
+  // A subscription cannot be premium without a valid future periodEnd date
+  if (!periodEnd || now > periodEnd) {
+    return false;
+  }
+
   // 1. Fully active, authenticated, or resumed subscriptions
   if (['active', 'authenticated', 'resumed'].includes(status)) {
-    if (periodEnd && now > periodEnd) {
-      return false; // Period expired
-    }
     return true;
   }
 
   // 2. Cancelled subscriptions: retain benefits until the end of paid cycle
   if (status === 'cancelled') {
-    if (periodEnd && now <= periodEnd) {
-      return true;
-    }
-    return false;
+    return true;
   }
 
-  // 3. Pending subscriptions: in grace period while charge retry is underway
+  // 3. Pending subscriptions: in grace period while charge retry is underway (only if previously paid)
   if (status === 'pending') {
-    if (periodEnd && now <= periodEnd) {
-      return true;
-    }
-    return false;
+    return true;
   }
 
-  // 4. Paused, halted, completed, expired, or created states
+  // 4. Paused, halted, completed, expired, created, failed, or none states
   return false;
 }
 
@@ -117,7 +118,27 @@ class BackendSubscriptionService {
       throw new Error('Invalid Razorpay signature. Authorization verification failed.');
     }
 
-    // 2. Fetch Subscription from Razorpay API with 4s timeout fallback
+    // 2. Fetch Payment directly from Razorpay API to confirm it was actually captured and not failed
+    let payment = null;
+    try {
+      payment = await razorpayClient.fetchPayment(paymentId);
+    } catch (payErr) {
+      console.warn('[SUBSCRIPTION VERIFY] Payment fetch notice:', payErr.message || payErr);
+    }
+
+    if (payment) {
+      if (payment.status === 'failed' || payment.error_code) {
+        const errorMsg = payment.error_description || payment.error_reason || 'Payment was declined or failed.';
+        console.error(`[SUBSCRIPTION VERIFY] Payment ${paymentId} failed: ${errorMsg}`);
+        throw new Error(`Payment failed: ${errorMsg}`);
+      }
+      if (payment.status !== 'captured' && payment.status !== 'authorized') {
+        console.error(`[SUBSCRIPTION VERIFY] Payment ${paymentId} in non-successful status: ${payment.status}`);
+        throw new Error(`Payment has not been completed. Status: ${payment.status}`);
+      }
+    }
+
+    // 3. Fetch Subscription from Razorpay API with 4s timeout fallback
     let rzpSub = null;
     try {
       const fetchPromise = razorpayClient.fetchSubscription(subscriptionId);
@@ -127,12 +148,12 @@ class BackendSubscriptionService {
       console.warn('[SUBSCRIPTION] Fetch from Razorpay notice:', fetchErr.message || fetchErr);
     }
 
-    const now = Date.now();
-    const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : new Date();
-    const currentEnd = (rzpSub && rzpSub.current_end) ? new Date(rzpSub.current_end * 1000) : new Date(now + 30 * 86400000);
-    const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
+    // If subscription is in a terminal or halted state, reject activation
+    if (rzpSub && ['halted', 'cancelled', 'completed', 'expired'].includes(rzpSub.status)) {
+      throw new Error(`Subscription cannot be activated because its status is ${rzpSub.status}.`);
+    }
 
-    // 3. Resolve planId
+    // 4. Resolve planId
     let planId = (rzpSub && rzpSub.notes && rzpSub.notes.planId) || 'plan_1_month';
     if (!RAZORPAY_PLANS[planId]) {
       for (const [key, val] of Object.entries(RAZORPAY_PLANS)) {
@@ -143,11 +164,22 @@ class BackendSubscriptionService {
       }
     }
 
+    const planConfig = RAZORPAY_PLANS[planId] || { durationDays: 30 };
+    const durationDays = planConfig.durationDays || 30;
+
+    const now = Date.now();
+    const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : new Date();
+    // Only set valid periodEnd if payment was captured or subscription has duration
+    const currentEnd = (rzpSub && rzpSub.current_end)
+      ? new Date(rzpSub.current_end * 1000)
+      : new Date(now + durationDays * 86400000);
+    const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
+
     let status = (rzpSub && rzpSub.status) || 'active';
     if (status === 'created') {
       status = 'authenticated';
     }
-    const isPremium = calculateIsPremium({ status, currentEnd, endedAt: null });
+    const isPremium = calculateIsPremium({ status, currentEnd, endedAt: null, paidCount: 1 });
 
     const subscriptionData = {
       provider: 'razorpay',
@@ -295,16 +327,20 @@ class BackendSubscriptionService {
           const rzpSub = await razorpayClient.fetchSubscription(subscriptionId);
           if (rzpSub && rzpSub.status) {
             let liveStatus = rzpSub.status;
-            // If the user already verified checkout with valid signature, do not downgrade back to 'created'
-            if (liveStatus === 'created' && (data.razorpayStatus === 'authenticated' || data.razorpayStatus === 'active' || data.lastPaymentId)) {
-              liveStatus = data.razorpayStatus || 'authenticated';
+            const paidCount = typeof rzpSub.paid_count === 'number' ? rzpSub.paid_count : (data.lastPaymentId ? 1 : 0);
+
+            // If Razorpay reports paid_count is 0 or status is created, the subscription was never paid!
+            if (paidCount === 0 || liveStatus === 'created') {
+              liveStatus = 'created';
+            } else if (liveStatus === 'created' && (data.razorpayStatus === 'authenticated' || data.razorpayStatus === 'active') && data.lastPaymentId && paidCount > 0) {
+              liveStatus = data.razorpayStatus;
             }
 
-            const currentStart = rzpSub.current_start ? new Date(rzpSub.current_start * 1000) : data.currentPeriodStart;
-            const currentEnd = rzpSub.current_end ? new Date(rzpSub.current_end * 1000) : data.currentPeriodEnd;
+            const currentStart = rzpSub.current_start ? new Date(rzpSub.current_start * 1000) : (paidCount > 0 ? data.currentPeriodStart : null);
+            const currentEnd = rzpSub.current_end ? new Date(rzpSub.current_end * 1000) : (paidCount > 0 ? data.currentPeriodEnd : null);
             const endedAt = rzpSub.ended_at ? new Date(rzpSub.ended_at * 1000) : (data.endedAt || null);
 
-            const isPremium = calculateIsPremium({ status: liveStatus, currentEnd, endedAt });
+            const isPremium = calculateIsPremium({ status: liveStatus, currentEnd, endedAt, paidCount });
 
             if (data.razorpayStatus !== liveStatus || data.isPremium !== isPremium) {
               const updateData = {

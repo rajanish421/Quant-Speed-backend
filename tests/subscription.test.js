@@ -174,3 +174,61 @@ test('POST /api/webhooks/razorpay processes valid HMAC signature event', async (
   assert.strictEqual(res.data.success, true);
   assert.strictEqual(res.data.eventId, 'evt_valid_101');
 });
+
+test('calculateIsPremium enforces strict paid cycle requirements', () => {
+  const { calculateIsPremium } = require('../services/subscription_service');
+  const future = new Date(Date.now() + 30 * 86400000);
+  const past = new Date(Date.now() - 1000);
+
+  // Fails if paidCount is 0
+  assert.strictEqual(calculateIsPremium({ status: 'active', currentEnd: future, paidCount: 0 }), false);
+
+  // Fails if currentEnd is null
+  assert.strictEqual(calculateIsPremium({ status: 'active', currentEnd: null, paidCount: 1 }), false);
+
+  // Fails if period has expired
+  assert.strictEqual(calculateIsPremium({ status: 'active', currentEnd: past, paidCount: 1 }), false);
+
+  // Fails on failed or created states
+  assert.strictEqual(calculateIsPremium({ status: 'failed', currentEnd: future, paidCount: 1 }), false);
+  assert.strictEqual(calculateIsPremium({ status: 'created', currentEnd: future, paidCount: 0 }), false);
+
+  // Succeeds on valid active paid period
+  assert.strictEqual(calculateIsPremium({ status: 'active', currentEnd: future, paidCount: 1 }), true);
+  // Retains premium during grace/cancelled before expiry
+  assert.strictEqual(calculateIsPremium({ status: 'cancelled', currentEnd: future, paidCount: 1 }), true);
+});
+
+test('POST /api/webhooks/razorpay handles payment.failed without granting premium', async () => {
+  const eventId = `evt_failed_${Date.now()}`;
+  const eventObj = {
+    event_id: eventId,
+    event: 'payment.failed',
+    payload: {
+      payment: {
+        entity: {
+          id: 'pay_failed_101',
+          status: 'failed',
+          amount: 1400,
+          subscription_id: 'sub_test_webhook_failed_1',
+          error_code: 'BAD_REQUEST_ERROR',
+          error_description: 'Payment failed at bank gateway',
+        },
+      },
+    },
+  };
+
+  const rawBody = JSON.stringify(eventObj);
+  const signature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest('hex');
+
+  const res = await makeRequest('/api/webhooks/razorpay', {
+    method: 'POST',
+    headers: { 'X-Razorpay-Signature': signature },
+  }, null, rawBody);
+
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.data.success, true);
+});
