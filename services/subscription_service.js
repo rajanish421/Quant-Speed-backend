@@ -37,6 +37,31 @@ function calculateIsPremium({ status, currentEnd, endedAt }) {
   return false;
 }
 
+function getPlanDurationDays(planId) {
+  const plan = RAZORPAY_PLANS[planId];
+  if (plan && plan.durationDays) return plan.durationDays;
+  if (!planId) return 30;
+  if (planId.includes('3_month') || planId.includes('quarter')) return 90;
+  if (planId.includes('6_month')) return 180;
+  if (planId.includes('year') || planId.includes('annual') || planId.includes('1_year')) return 365;
+  return 30;
+}
+
+function toIsoDate(val) {
+  if (!val) return null;
+  if (typeof val.toDate === 'function') return val.toDate().toISOString();
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'number') {
+    return new Date(val < 10000000000 ? val * 1000 : val).toISOString();
+  }
+  if (typeof val === 'object' && (val._seconds || val.seconds)) {
+    const sec = val._seconds || val.seconds;
+    return new Date(sec * 1000).toISOString();
+  }
+  if (typeof val === 'string') return val;
+  return null;
+}
+
 class BackendSubscriptionService {
   /**
    * Creates a new Razorpay recurring subscription for an authenticated user.
@@ -127,11 +152,6 @@ class BackendSubscriptionService {
       console.warn('[SUBSCRIPTION] Fetch from Razorpay notice:', fetchErr.message || fetchErr);
     }
 
-    const now = Date.now();
-    const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : new Date();
-    const currentEnd = (rzpSub && rzpSub.current_end) ? new Date(rzpSub.current_end * 1000) : new Date(now + 30 * 86400000);
-    const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
-
     // 3. Resolve planId
     let planId = (rzpSub && rzpSub.notes && rzpSub.notes.planId) || 'plan_1_month';
     if (!RAZORPAY_PLANS[planId]) {
@@ -142,6 +162,14 @@ class BackendSubscriptionService {
         }
       }
     }
+
+    const durationDays = getPlanDurationDays(planId);
+    const now = Date.now();
+    const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : new Date();
+    const currentEnd = (rzpSub && rzpSub.current_end)
+      ? new Date(rzpSub.current_end * 1000)
+      : new Date(currentStart.getTime() + durationDays * 86400000);
+    const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
 
     let status = (rzpSub && rzpSub.status) || 'active';
     if (status === 'created') {
@@ -300,9 +328,12 @@ class BackendSubscriptionService {
               liveStatus = data.razorpayStatus || 'authenticated';
             }
 
-            const currentStart = rzpSub.current_start ? new Date(rzpSub.current_start * 1000) : data.currentPeriodStart;
-            const currentEnd = rzpSub.current_end ? new Date(rzpSub.current_end * 1000) : data.currentPeriodEnd;
-            const endedAt = rzpSub.ended_at ? new Date(rzpSub.ended_at * 1000) : (data.endedAt || null);
+            const planDurationDays = getPlanDurationDays(data.planId);
+            const currentStart = rzpSub.current_start ? new Date(rzpSub.current_start * 1000) : (data.currentPeriodStart ? new Date(toIsoDate(data.currentPeriodStart)) : new Date());
+            const currentEnd = rzpSub.current_end
+              ? new Date(rzpSub.current_end * 1000)
+              : (data.currentPeriodEnd ? new Date(toIsoDate(data.currentPeriodEnd)) : new Date(currentStart.getTime() + planDurationDays * 86400000));
+            const endedAt = rzpSub.ended_at ? new Date(rzpSub.ended_at * 1000) : (data.endedAt ? new Date(toIsoDate(data.endedAt)) : null);
 
             const isPremium = calculateIsPremium({ status: liveStatus, currentEnd, endedAt });
 
@@ -329,8 +360,13 @@ class BackendSubscriptionService {
       }
 
       const status = data.razorpayStatus || data.status || 'none';
-      const currentEnd = data.currentPeriodEnd;
-      const endedAt = data.endedAt;
+      const planDurationDays = getPlanDurationDays(data.planId);
+      const currentStart = data.currentPeriodStart ? new Date(toIsoDate(data.currentPeriodStart)) : null;
+      let currentEnd = data.currentPeriodEnd ? new Date(toIsoDate(data.currentPeriodEnd)) : null;
+      if (!currentEnd && currentStart && planDurationDays) {
+        currentEnd = new Date(currentStart.getTime() + planDurationDays * 86400000);
+      }
+      const endedAt = data.endedAt ? new Date(toIsoDate(data.endedAt)) : null;
 
       const isPremium = calculateIsPremium({ status, currentEnd, endedAt });
 
@@ -342,14 +378,14 @@ class BackendSubscriptionService {
         razorpayPlanId: data.razorpayPlanId || null,
         subscriptionId: data.subscriptionId || data.razorpaySubscriptionId || null,
         razorpaySubscriptionId: data.subscriptionId || data.razorpaySubscriptionId || null,
-        currentPeriodStart: data.currentPeriodStart || null,
-        currentPeriodEnd: data.currentPeriodEnd || null,
-        nextChargeAt: data.nextChargeAt || null,
-        endedAt: data.endedAt || null,
+        currentPeriodStart: toIsoDate(currentStart),
+        currentPeriodEnd: toIsoDate(currentEnd),
+        nextChargeAt: toIsoDate(data.nextChargeAt),
+        endedAt: toIsoDate(endedAt),
         lastWebhookEvent: data.lastWebhookEvent || null,
         lastWebhookEventId: data.lastWebhookEventId || null,
         lastPaymentId: data.lastPaymentId || null,
-        updatedAt: data.updatedAt || null,
+        updatedAt: toIsoDate(data.updatedAt),
       };
     } catch (err) {
       console.error('[SUBSCRIPTION STATUS] Error fetching status:', err.message);
@@ -360,3 +396,5 @@ class BackendSubscriptionService {
 
 module.exports = new BackendSubscriptionService();
 module.exports.calculateIsPremium = calculateIsPremium;
+module.exports.getPlanDurationDays = getPlanDurationDays;
+module.exports.toIsoDate = toIsoDate;

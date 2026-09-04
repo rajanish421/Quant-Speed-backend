@@ -1,7 +1,7 @@
 const { db } = require('./firebase_admin');
 const razorpayClient = require('./razorpay_client');
 const { RAZORPAY_PLANS, getRazorpayPlanId } = require('../config/razorpay_plans');
-const { calculateIsPremium } = require('./subscription_service');
+const { calculateIsPremium, getPlanDurationDays } = require('./subscription_service');
 
 class WebhookService {
   /**
@@ -133,11 +133,6 @@ class WebhookService {
   async _handleSubscriptionLifecycle({ uid, eventId, eventType, subscriptionId, subEntity, paymentEntity }) {
     if (!db) return;
 
-    const currentStart = (subEntity && subEntity.current_start) ? new Date(subEntity.current_start * 1000) : new Date();
-    const currentEnd = (subEntity && subEntity.current_end) ? new Date(subEntity.current_end * 1000) : new Date(Date.now() + 30 * 86400000);
-    const nextChargeAt = (subEntity && subEntity.charge_at) ? new Date(subEntity.charge_at * 1000) : currentEnd;
-    const endedAt = (subEntity && subEntity.ended_at) ? new Date(subEntity.ended_at * 1000) : null;
-
     // Resolve planId
     let planId = subEntity && subEntity.notes && subEntity.notes.planId;
     if (!planId && subEntity && subEntity.plan_id) {
@@ -148,6 +143,14 @@ class WebhookService {
         }
       }
     }
+
+    const durationDays = getPlanDurationDays(planId);
+    const currentStart = (subEntity && subEntity.current_start) ? new Date(subEntity.current_start * 1000) : new Date();
+    const currentEnd = (subEntity && subEntity.current_end)
+      ? new Date(subEntity.current_end * 1000)
+      : new Date(currentStart.getTime() + durationDays * 86400000);
+    const nextChargeAt = (subEntity && subEntity.charge_at) ? new Date(subEntity.charge_at * 1000) : currentEnd;
+    const endedAt = (subEntity && subEntity.ended_at) ? new Date(subEntity.ended_at * 1000) : null;
 
     let status = (subEntity && subEntity.status) || 'active';
 

@@ -16,6 +16,7 @@ const RAZORPAY_PLANS = {
     currency: 'INR',
     period: 'monthly',
     interval: 1,
+    durationDays: 30,
     description: 'Monthly recurring subscription for QuantSpeed Premium',
     envKeys: ['RAZORPAY_PLAN_MONTHLY', 'RAZORPAY_PLAN_1_MONTH'],
     totalBillingCycles: 120, // 10 years max recurring
@@ -27,6 +28,7 @@ const RAZORPAY_PLANS = {
     currency: 'INR',
     period: 'quarterly',
     interval: 1,
+    durationDays: 90,
     description: 'Quarterly recurring subscription for QuantSpeed Premium',
     envKeys: ['RAZORPAY_PLAN_QUARTERLY', 'RAZORPAY_PLAN_3_MONTHS'],
     totalBillingCycles: 40, // 10 years max recurring
@@ -38,6 +40,7 @@ const RAZORPAY_PLANS = {
     currency: 'INR',
     period: 'monthly',
     interval: 6,
+    durationDays: 180,
     description: '6-Month recurring subscription for QuantSpeed Premium',
     envKeys: ['RAZORPAY_PLAN_6_MONTHS', 'RAZORPAY_PLAN_6_MONTH'],
     totalBillingCycles: 20, // 10 years max recurring
@@ -49,6 +52,7 @@ const RAZORPAY_PLANS = {
     currency: 'INR',
     period: 'yearly',
     interval: 1,
+    durationDays: 365,
     description: 'Annual recurring subscription for QuantSpeed Premium',
     envKeys: ['RAZORPAY_PLAN_YEARLY', 'RAZORPAY_PLAN_1_YEAR', 'RAZORPAY_PLAN_ANNUAL'],
     totalBillingCycles: 10, // 10 years max recurring
