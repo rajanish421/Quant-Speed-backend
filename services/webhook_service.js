@@ -133,124 +133,23 @@ class WebhookService {
   async _handleSubscriptionLifecycle({ uid, eventId, eventType, subscriptionId, subEntity, paymentEntity }) {
     if (!db) return;
 
-    // 1. DEDICATED HANDLING FOR PAYMENT FAILURE
-    if (eventType === 'payment.failed') {
-      const paymentId = (paymentEntity && paymentEntity.id) || '';
-      const errorDesc = (paymentEntity && (paymentEntity.error_description || paymentEntity.error_reason)) || 'Payment was declined or failed.';
-      console.warn(`[WEBHOOK] Payment ${paymentId} failed for subscription: ${subscriptionId}. Error: ${errorDesc}`);
-
-      // Fetch subscription from Razorpay to check actual paid_count
-      let rzpSub = subEntity;
-      if (!rzpSub && subscriptionId) {
-        try {
-          rzpSub = await razorpayClient.fetchSubscription(subscriptionId);
-        } catch (e) {
-          console.warn(`[WEBHOOK] Fetch sub notice on payment.failed: ${e.message}`);
-        }
-      }
-
-      const paidCount = (rzpSub && rzpSub.paid_count) || 0;
-
-      // Update mapping document for audit/debugging
-      await db.doc(`subscriptions/${subscriptionId}`).set({
-        uid,
-        status: paidCount === 0 ? 'failed' : ((rzpSub && rzpSub.status) || 'pending'),
-        razorpayStatus: paidCount === 0 ? 'failed' : ((rzpSub && rzpSub.status) || 'pending'),
-        isPremium: false,
-        lastPaymentId: paymentId,
-        lastPaymentError: errorDesc,
-        lastWebhookEvent: eventType,
-        lastWebhookEventId: eventId,
-        updatedAt: new Date(),
-      }, { merge: true });
-
-      // If initial subscription checkout failed (paidCount === 0):
-      if (paidCount === 0) {
-        const userSubDoc = await db.doc(`users/${uid}/subscription/current`).get();
-        if (userSubDoc.exists) {
-          const currentData = userSubDoc.data();
-          if (currentData.subscriptionId === subscriptionId || currentData.razorpaySubscriptionId === subscriptionId) {
-            await db.doc(`users/${uid}/subscription/current`).set({
-              status: 'failed',
-              razorpayStatus: 'failed',
-              isPremium: false,
-              lastPaymentId: paymentId,
-              lastPaymentError: errorDesc,
-              lastWebhookEvent: eventType,
-              lastWebhookEventId: eventId,
-              updatedAt: new Date(),
-            }, { merge: true });
-          }
-        }
-        console.log(`[WEBHOOK] Initial payment failed for user ${uid}, sub ${subscriptionId}. isPremium marked FALSE.`);
-        return;
-      }
-
-      // If recurring renewal failed on an existing paid subscription (paidCount > 0):
-      const userSubDoc = await db.doc(`users/${uid}/subscription/current`).get();
-      if (userSubDoc.exists) {
-        const currentData = userSubDoc.data();
-        const existingEnd = currentData.currentPeriodEnd;
-        const isStillValid = calculateIsPremium({
-          status: 'pending',
-          currentEnd: existingEnd,
-          endedAt: null,
-          paidCount,
-        });
-
-        await db.doc(`users/${uid}/subscription/current`).set({
-          status: 'pending',
-          razorpayStatus: 'pending',
-          isPremium: isStillValid,
-          lastPaymentId: paymentId,
-          lastPaymentError: errorDesc,
-          lastWebhookEvent: eventType,
-          lastWebhookEventId: eventId,
-          updatedAt: new Date(),
-        }, { merge: true });
-        console.log(`[WEBHOOK] Renewal payment failed for user ${uid}, sub ${subscriptionId}. Grace isPremium: ${isStillValid}`);
-      }
-      return;
-    }
-
-    // 2. SUBSCRIPTION LIFECYCLE FOR OTHER EVENTS
-    let rzpSub = subEntity;
-    if (!rzpSub && subscriptionId) {
-      try {
-        rzpSub = await razorpayClient.fetchSubscription(subscriptionId);
-      } catch (e) {
-        console.warn(`[WEBHOOK] Fetch sub notice: ${e.message}`);
-      }
-    }
-
-    const paidCount = typeof (rzpSub && rzpSub.paid_count) === 'number'
-      ? rzpSub.paid_count
-      : (eventType === 'subscription.charged' ? 1 : 0);
+    const currentStart = (subEntity && subEntity.current_start) ? new Date(subEntity.current_start * 1000) : new Date();
+    const currentEnd = (subEntity && subEntity.current_end) ? new Date(subEntity.current_end * 1000) : new Date(Date.now() + 30 * 86400000);
+    const nextChargeAt = (subEntity && subEntity.charge_at) ? new Date(subEntity.charge_at * 1000) : currentEnd;
+    const endedAt = (subEntity && subEntity.ended_at) ? new Date(subEntity.ended_at * 1000) : null;
 
     // Resolve planId
-    let planId = (rzpSub && rzpSub.notes && rzpSub.notes.planId);
-    if (!planId && rzpSub && rzpSub.plan_id) {
+    let planId = subEntity && subEntity.notes && subEntity.notes.planId;
+    if (!planId && subEntity && subEntity.plan_id) {
       for (const [key] of Object.entries(RAZORPAY_PLANS)) {
-        if (getRazorpayPlanId(key) === rzpSub.plan_id) {
+        if (getRazorpayPlanId(key) === subEntity.plan_id) {
           planId = key;
           break;
         }
       }
     }
-    planId = planId || 'plan_1_month';
 
-    const planConfig = RAZORPAY_PLANS[planId] || { durationDays: 30 };
-    const durationDays = planConfig.durationDays || 30;
-
-    const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : (paidCount > 0 ? new Date() : null);
-    let currentEnd = (rzpSub && rzpSub.current_end) ? new Date(rzpSub.current_end * 1000) : null;
-    if (!currentEnd && paidCount > 0 && ['subscription.charged', 'subscription.activated'].includes(eventType)) {
-      currentEnd = new Date(Date.now() + durationDays * 86400000);
-    }
-    const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
-    const endedAt = (rzpSub && rzpSub.ended_at) ? new Date(rzpSub.ended_at * 1000) : null;
-
-    let status = (rzpSub && rzpSub.status) || 'created';
+    let status = (subEntity && subEntity.status) || 'active';
 
     switch (eventType) {
       case 'subscription.authenticated':
@@ -298,6 +197,10 @@ class WebhookService {
         console.log(`[WEBHOOK] Subscription updated: ${subscriptionId}`);
         break;
 
+      case 'payment.failed':
+        console.warn(`[WEBHOOK] Payment failed for subscription: ${subscriptionId}`);
+        break;
+
       default:
         console.log(`[WEBHOOK] Event ${eventType} received for subscription: ${subscriptionId}`);
         break;
@@ -308,15 +211,14 @@ class WebhookService {
       status,
       currentEnd,
       endedAt,
-      paidCount,
     });
 
     const updateData = {
       provider: 'razorpay',
       subscriptionId,
       razorpaySubscriptionId: subscriptionId,
-      planId,
-      razorpayPlanId: (rzpSub && rzpSub.plan_id) || getRazorpayPlanId(planId) || '',
+      planId: planId || 'plan_1_month',
+      razorpayPlanId: (subEntity && subEntity.plan_id) || '',
       status,
       razorpayStatus: status,
       isPremium,
@@ -324,7 +226,7 @@ class WebhookService {
       currentPeriodEnd: currentEnd,
       nextChargeAt,
       endedAt,
-      lastPaymentId: (paymentEntity && paymentEntity.id) || (rzpSub && rzpSub.payment_id) || '',
+      lastPaymentId: (paymentEntity && paymentEntity.id) || (subEntity && subEntity.payment_id) || '',
       lastWebhookEvent: eventType,
       lastWebhookEventId: eventId,
       updatedAt: new Date(),

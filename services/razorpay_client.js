@@ -90,24 +90,6 @@ class RazorpayClientService {
   }
 
   /**
-   * Fetches details of a payment from Razorpay API.
-   */
-  async fetchPayment(paymentId) {
-    if (this.client && paymentId) {
-      return await this.client.payments.fetch(paymentId);
-    }
-
-    // Mock Mode
-    return {
-      id: paymentId,
-      entity: 'payment',
-      status: 'captured',
-      amount: 1400,
-      currency: 'INR',
-    };
-  }
-
-  /**
    * Cancels a Razorpay Subscription.
    */
   async cancelSubscription(subscriptionId, cancelAtCycleEnd = false) {
