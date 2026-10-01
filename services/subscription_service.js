@@ -166,9 +166,31 @@ class BackendSubscriptionService {
     const durationDays = getPlanDurationDays(planId);
     const now = Date.now();
     const currentStart = (rzpSub && rzpSub.current_start) ? new Date(rzpSub.current_start * 1000) : new Date();
+
+    // Preserve remaining active period if renewing or extending early (stacking)
+    let baseStartDate = currentStart;
+    if (db && (!rzpSub || !rzpSub.current_end)) {
+      try {
+        const existingDoc = await db.doc(`users/${uid}/subscription/current`).get();
+        if (existingDoc.exists) {
+          const exData = existingDoc.data();
+          if (exData.isPremium && exData.currentPeriodEnd) {
+            const exEnd = exData.currentPeriodEnd.toDate
+              ? exData.currentPeriodEnd.toDate()
+              : new Date(toIsoDate(exData.currentPeriodEnd));
+            if (exEnd && exEnd.getTime() > now) {
+              baseStartDate = exEnd; // Extend from current active expiration date
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[SUBSCRIPTION] Stacking check notice:', e.message);
+      }
+    }
+
     const currentEnd = (rzpSub && rzpSub.current_end)
       ? new Date(rzpSub.current_end * 1000)
-      : new Date(currentStart.getTime() + durationDays * 86400000);
+      : new Date(baseStartDate.getTime() + durationDays * 86400000);
     const nextChargeAt = (rzpSub && rzpSub.charge_at) ? new Date(rzpSub.charge_at * 1000) : currentEnd;
 
     let status = (rzpSub && rzpSub.status) || 'active';

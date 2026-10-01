@@ -26,8 +26,8 @@ const RAZORPAY_PLANS = {
     name: 'QuantSpeed Premium - 3 Months',
     amount: 3900, // in paise (₹39.00)
     currency: 'INR',
-    period: 'quarterly',
-    interval: 1,
+    period: 'monthly',
+    interval: 3,
     durationDays: 90,
     description: 'Quarterly recurring subscription for QuantSpeed Premium',
     envKeys: ['RAZORPAY_PLAN_QUARTERLY', 'RAZORPAY_PLAN_3_MONTHS'],
@@ -59,6 +59,13 @@ const RAZORPAY_PLANS = {
   },
 };
 
+const LIVE_PLAN_DEFAULTS = {
+  plan_1_month: 'plan_TigidmOIybV8IG',
+  plan_3_months: 'plan_TigkZpV3Ohpa1Y',
+  plan_6_months: 'plan_TiglRpKwujCj8O',
+  plan_1_year: 'plan_TigmSEVA0jfmla',
+};
+
 /**
  * Resolves the server-controlled Razorpay Plan ID for a requested QuantSpeed plan ID.
  */
@@ -70,7 +77,7 @@ function getRazorpayPlanId(planId) {
       return process.env[envKey].trim();
     }
   }
-  return `plan_test_${planId}`;
+  return LIVE_PLAN_DEFAULTS[planId] || `plan_live_${planId}`;
 }
 
 module.exports = {
